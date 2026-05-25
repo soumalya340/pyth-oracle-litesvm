@@ -119,7 +119,7 @@ function startSvm(): LiteSVM {
 function createProgram(): Program<OraclePractice> {
   const wallet = new Wallet(Keypair.generate());
   const provider = new AnchorProvider(
-    new Connection(clusterApiUrl("devnet")),
+    new Connection(clusterApiUrl("mainnet-beta")),
     wallet,
     {},
   );
