@@ -110,7 +110,9 @@ async function cloneMainnetFeed(
 ) {
   const accountInfo = await connection.getAccountInfo(feedAddress);
   if (!accountInfo) {
-    throw new Error(`Pyth push feed not found on mainnet: ${feedAddress.toBase58()}`);
+    throw new Error(
+      `Pyth push feed not found on mainnet: ${feedAddress.toBase58()}`,
+    );
   }
 
   const { rawPrice, expo, publishTime } = readPriceUpdateFields(
