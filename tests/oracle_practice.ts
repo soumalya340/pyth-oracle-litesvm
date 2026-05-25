@@ -1,4 +1,9 @@
-import { AnchorProvider, Program, Wallet } from "@coral-xyz/anchor";
+import {
+  AnchorProvider,
+  BorshAccountsCoder,
+  Program,
+  Wallet,
+} from "@coral-xyz/anchor";
 import {
   clusterApiUrl,
   Connection,
@@ -63,39 +68,39 @@ function buildPriceUpdateV2(
   exponent: number,
   publishTime: number,
 ): Buffer {
-  const disc = createHash("sha256")
-    .update("account:PriceUpdateV2")
-    .digest()
-    .subarray(0, 8);
+    const disc = createHash("sha256")
+      .update("account:PriceUpdateV2")
+      .digest()
+      .subarray(0, 8);
 
-  const buf = Buffer.alloc(133);
-  let off = 0;
+    const buf = Buffer.alloc(133);
+    let off = 0;
 
-  disc.copy(buf, off);
-  off += 8;
-  Buffer.alloc(32).copy(buf, off);
-  off += 32; // write_authority (zero pubkey)
-  buf.writeUInt8(1, off);
-  off += 1; // VerificationLevel::Full
-  feedId.copy(buf, off);
-  off += 32; // feed_id
-  buf.writeBigInt64LE(priceI64, off);
-  off += 8;
-  buf.writeBigUInt64LE(BigInt(0), off);
-  off += 8; // conf
-  buf.writeInt32LE(exponent, off);
-  off += 4;
-  buf.writeBigInt64LE(BigInt(publishTime), off);
-  off += 8; // publish_time
-  buf.writeBigInt64LE(BigInt(publishTime - 1), off);
-  off += 8; // prev_publish_time
-  buf.writeBigInt64LE(priceI64, off);
-  off += 8; // ema_price
-  buf.writeBigUInt64LE(BigInt(0), off);
-  off += 8; // ema_conf
-  buf.writeBigUInt64LE(BigInt(1), off); // posted_slot
+    disc.copy(buf, off);
+    off += 8;
+    Buffer.alloc(32).copy(buf, off);
+    off += 32; // write_authority (zero pubkey)
+    buf.writeUInt8(1, off);
+    off += 1; // VerificationLevel::Full
+    feedId.copy(buf, off);
+    off += 32; // feed_id
+    buf.writeBigInt64LE(priceI64, off);
+    off += 8;
+    buf.writeBigUInt64LE(BigInt(0), off);
+    off += 8; // conf
+    buf.writeInt32LE(exponent, off);
+    off += 4;
+    buf.writeBigInt64LE(BigInt(publishTime), off);
+    off += 8; // publish_time
+    buf.writeBigInt64LE(BigInt(publishTime - 1), off);
+    off += 8; // prev_publish_time
+    buf.writeBigInt64LE(priceI64, off);
+    off += 8; // ema_price
+    buf.writeBigUInt64LE(BigInt(0), off);
+    off += 8; // ema_conf
+    buf.writeBigUInt64LE(BigInt(1), off); // posted_slot
 
-  return buf;
+    return buf;
 }
 
 // ─────────────────────────────────────────────
@@ -176,14 +181,11 @@ describe("oracle_practice", () => {
     const raw = svm.getAccount(currentPricePda);
     expect(raw).to.not.be.null;
 
-    // Decode: anchor discriminator (8 bytes) + u64 btc_price (8 bytes, LE)
-    const priceLow =
-      raw!.data[8] |
-      (raw!.data[9] << 8) |
-      (raw!.data[10] << 16) |
-      (raw!.data[11] << 24);
-    expect(priceLow).to.equal(0);
-    console.log("btc_price after initialize:", priceLow);
+    const coder = new BorshAccountsCoder(OraclePracticeIDL as any);
+    const decoded = coder.decode("CurrentPrice", Buffer.from(raw!.data));
+    console.log("Decoded Value :", decoded);
+    console.log("btc_price after initialize:", decoded.btc_price.toString());
+    expect(decoded.btc_price.toNumber()).to.equal(0);
   });
 
   // ── Test 2: live BTC/USD price via Pyth Hermes + PriceUpdateV2 ───────────
@@ -248,14 +250,13 @@ describe("oracle_practice", () => {
 
     sendTx(svm, priceTx, [user]);
 
-    // Step 6 — read back the stored whole-dollar price (u64 at byte offset 8, LE)
+    // Step 6 — read back the stored whole-dollar price via BorshAccountsCoder
     const raw = svm.getAccount(currentPricePda);
     expect(raw).to.not.be.null;
 
-    const d = raw!.data;
-    const lo = d[8] | (d[9] << 8) | (d[10] << 16) | (d[11] << 24);
-    const hi = d[12] | (d[13] << 8) | (d[14] << 16) | (d[15] << 24);
-    const storedPrice = lo + hi * 0x100000000;
+    const coder = new BorshAccountsCoder(OraclePracticeIDL as any);
+    const decoded = coder.decode("CurrentPrice", Buffer.from(raw!.data));
+    const storedPrice = decoded.btc_price.toNumber();
 
     const expectedWholeUsd = Math.floor(
       Number(priceI64) * Math.pow(10, exponent),
