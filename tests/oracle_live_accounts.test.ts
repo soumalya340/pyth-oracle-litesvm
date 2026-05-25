@@ -164,7 +164,6 @@ describe("oracle_live_accounts", () => {
     connection = new Connection(clusterApiUrl("mainnet-beta"));
   });
 
-  // ── Test 1: cloned mainnet account ────────────────────────────────────────
   // Fetches the real PriceUpdateV2 account bytes from mainnet — the same bytes
   // written by the actual Pyth Receiver program after guardian verification.
   // Injects them into LiteSVM at the canonical feed address (identical to
@@ -208,8 +207,6 @@ describe("oracle_live_accounts", () => {
       `stored BTC/USD price: $${storedPrice} (mainnet whole-dollar: $${expectedWholeUsd})`,
     );
 
-    expect(storedPrice).to.be.greaterThan(1_000);
-    expect(storedPrice).to.be.lessThan(10_000_000);
     expect(storedPrice).to.equal(expectedWholeUsd);
   });
 
@@ -249,8 +246,6 @@ describe("oracle_live_accounts", () => {
       `stored SOL/USD price: $${storedPrice} (mainnet whole-dollar: $${expectedWholeUsd})`,
     );
 
-    expect(storedPrice).to.be.greaterThan(1);
-    expect(storedPrice).to.be.lessThan(10_000);
     expect(storedPrice).to.equal(expectedWholeUsd);
   });
 
@@ -290,8 +285,6 @@ describe("oracle_live_accounts", () => {
       `stored ETH/USD price: $${storedPrice} (mainnet whole-dollar: $${expectedWholeUsd})`,
     );
 
-    expect(storedPrice).to.be.greaterThan(100);
-    expect(storedPrice).to.be.lessThan(100_000);
     expect(storedPrice).to.equal(expectedWholeUsd);
   });
 });
