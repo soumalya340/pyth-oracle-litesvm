@@ -3,8 +3,10 @@
   "scripts": {
     "lint:fix": "prettier */*.js \"*/**/*{.js,.ts}\" -w",
     "lint": "prettier */*.js \"*/**/*{.js,.ts}\" --check",
-    "test:litesvm": "yarn ts-mocha -p ./tsconfig.json -t 1000000 tests/oracle_practice.ts"
+    "test:litesvm_test1": "yarn ts-mocha -p ./tsconfig.json -t 1000000 tests/oracle.test.ts",
+    "test:litesvm_test2": "yarn ts-mocha -p ./tsconfig.json -t 1000000 tests/oracle_live_accounts.test.ts"
   },
+  "type" : "module",
   "dependencies": {
     "@coral-xyz/anchor": "^0.31.0",
     "@solana/spl-token": "^0.4.14",
