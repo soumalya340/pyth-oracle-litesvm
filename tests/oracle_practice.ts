@@ -68,39 +68,16 @@ function buildPriceUpdateV2(
   exponent: number,
   publishTime: number,
 ): Buffer {
-    const disc = createHash("sha256")
-      .update("account:PriceUpdateV2")
-      .digest()
-      .subarray(0, 8);
+  const buf = Buffer.alloc(133); // zeros fill: write_authority, conf, prev_publish_time, ema_*, posted_slot
 
-    const buf = Buffer.alloc(133);
-    let off = 0;
+  createHash("sha256").update("account:PriceUpdateV2").digest().copy(buf, 0, 0, 8);
+  buf.writeUInt8(1, 40);                        // VerificationLevel::Full
+  feedId.copy(buf, 41);                         // feed_id
+  buf.writeBigInt64LE(priceI64, 73);            // price
+  buf.writeInt32LE(exponent, 89);               // exponent
+  buf.writeBigInt64LE(BigInt(publishTime), 93); // publish_time
 
-    disc.copy(buf, off);
-    off += 8;
-    Buffer.alloc(32).copy(buf, off);
-    off += 32; // write_authority (zero pubkey)
-    buf.writeUInt8(1, off);
-    off += 1; // VerificationLevel::Full
-    feedId.copy(buf, off);
-    off += 32; // feed_id
-    buf.writeBigInt64LE(priceI64, off);
-    off += 8;
-    buf.writeBigUInt64LE(BigInt(0), off);
-    off += 8; // conf
-    buf.writeInt32LE(exponent, off);
-    off += 4;
-    buf.writeBigInt64LE(BigInt(publishTime), off);
-    off += 8; // publish_time
-    buf.writeBigInt64LE(BigInt(publishTime - 1), off);
-    off += 8; // prev_publish_time
-    buf.writeBigInt64LE(priceI64, off);
-    off += 8; // ema_price
-    buf.writeBigUInt64LE(BigInt(0), off);
-    off += 8; // ema_conf
-    buf.writeBigUInt64LE(BigInt(1), off); // posted_slot
-
-    return buf;
+  return buf;
 }
 
 // ─────────────────────────────────────────────
