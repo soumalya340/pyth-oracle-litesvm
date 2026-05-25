@@ -39,12 +39,21 @@ const BTC_USD_FEED_ID = Buffer.from(
   "hex",
 );
 
+const SOL_USD_FEED_ID = Buffer.from(
+  "ef0d8b6fda2ceba41da15d4095d1da392a0d2f8ed0c6c7bc0f4cfac8c280b56d",
+  "hex",
+);
+
+const ETH_USD_FEED_ID = Buffer.from(
+  "ff61491a931112ddf1bd8147cd1b641375f79f5825126d665480874634fd0ace",
+  "hex",
+);
+
 const CURRENT_PRICE_SEED = Buffer.from("current_price");
 
-// Pyth Hermes REST endpoint — returns the latest signed price, no wallet needed
-const HERMES_URL =
-  "https://hermes.pyth.network/v2/updates/price/latest" +
-  "?ids[]=e62df6c8b4a85fe1a67db44dc12de5db330f7ac66b72dc658afedf0f4a415b43";
+function hermesUrl(feedIdHex: string): string {
+  return `https://hermes.pyth.network/v2/updates/price/latest?ids[]=${feedIdHex}`;
+}
 
 // ─────────────────────────────────────────────
 // PriceUpdateV2 mock builder
@@ -129,6 +138,51 @@ function findCurrentPricePda(user: PublicKey): PublicKey {
   return pda;
 }
 
+async function fetchHermesPrice(feedIdHex: string) {
+  const resp = await fetch(hermesUrl(feedIdHex));
+  if (!resp.ok) throw new Error(`Hermes fetch failed: ${resp.status}`);
+  const json = (await resp.json()) as any;
+  const livePrice = json.parsed[0].price;
+  return {
+    priceI64: BigInt(livePrice.price) as bigint,
+    exponent: livePrice.expo as number,
+    publishTime: livePrice.publish_time as number,
+  };
+}
+
+function injectPriceFeed(
+  svm: LiteSVM,
+  feedId: Buffer,
+  priceI64: bigint,
+  exponent: number,
+  publishTime: number,
+): PublicKey {
+  const feedKey = Keypair.generate();
+  const accountData = buildPriceUpdateV2(
+    feedId,
+    priceI64,
+    exponent,
+    publishTime,
+  );
+
+  svm.setAccount(feedKey.publicKey, {
+    lamports: 1_000_000_000,
+    data: new Uint8Array(accountData),
+    owner: PYTH_RECEIVER_PROGRAM_ID,
+    executable: false,
+  });
+
+  const clock = svm.getClock();
+  clock.unixTimestamp = BigInt(publishTime);
+  svm.setClock(clock);
+
+  return feedKey.publicKey;
+}
+
+function wholeUsd(priceI64: bigint, exponent: number): number {
+  return Math.floor(Number(priceI64) * Math.pow(10, exponent));
+}
+
 // ─────────────────────────────────────────────
 // Tests
 // ─────────────────────────────────────────────
@@ -147,7 +201,7 @@ describe("oracle_practice", () => {
   });
 
   // ── Test 1: initialize ────────────────────────────────────────────────────
-  it("initialize: creates the CurrentPrice account with btc_price = 0", async () => {
+  it("initialize: creates the CurrentPrice account with all prices = 0", async () => {
     const tx = (await program.methods
       .initialize()
       .accounts({ deployer: user.publicKey })
@@ -161,8 +215,9 @@ describe("oracle_practice", () => {
     const coder = new BorshAccountsCoder(OraclePracticeIDL as any);
     const decoded = coder.decode("CurrentPrice", Buffer.from(raw!.data));
     console.log("Decoded Value :", decoded);
-    console.log("btc_price after initialize:", decoded.btc_price.toString());
     expect(decoded.btc_price.toNumber()).to.equal(0);
+    expect(decoded.sol_price.toNumber()).to.equal(0);
+    expect(decoded.eth_price.toNumber()).to.equal(0);
   });
 
   // ── Test 2: live BTC/USD price via Pyth Hermes + PriceUpdateV2 ───────────
@@ -171,79 +226,157 @@ describe("oracle_practice", () => {
   // The Pyth receiver program itself is never executed — only its account
   // format and owner ID matter for the Anchor owner/discriminator checks.
   it("get_btc_price: reads live BTC/USD price from Pyth Hermes", async () => {
-    // Step 1 — initialize the CurrentPrice PDA
     const initTx = (await program.methods
       .initialize()
       .accounts({ deployer: user.publicKey })
       .transaction()) as Transaction;
     sendTx(svm, initTx, [user]);
 
-    // Step 2 — fetch live BTC/USD price from Pyth Hermes REST API
-    const resp = await fetch(HERMES_URL);
-    if (!resp.ok) throw new Error(`Hermes fetch failed: ${resp.status}`);
-    const json = (await resp.json()) as any;
-    const livePrice = json.parsed[0].price;
-
-    const priceI64: bigint = BigInt(livePrice.price); // e.g. 7752876000000
-    const exponent: number = livePrice.expo; // e.g. -8
-    const publishTime: number = livePrice.publish_time;
+    const { priceI64, exponent, publishTime } = await fetchHermesPrice(
+      BTC_USD_FEED_ID.toString("hex"),
+    );
 
     console.log(
-      `Hermes BTC/USD: raw=${priceI64}, expo=${exponent} => ~$${Math.round(
-        Number(priceI64) * Math.pow(10, exponent),
+      `Hermes BTC/USD: raw=${priceI64}, expo=${exponent} => ~$${wholeUsd(
+        priceI64,
+        exponent,
       )}`,
     );
 
-    // Step 3 — build PriceUpdateV2 account bytes with the live price
-    // Use an ephemeral keypair as the account address (we fully own the bytes)
-    const feedKey = Keypair.generate();
-    const accountData = buildPriceUpdateV2(
+    const feedKey = injectPriceFeed(
+      svm,
       BTC_USD_FEED_ID,
       priceI64,
       exponent,
       publishTime,
     );
 
-    svm.setAccount(feedKey.publicKey, {
-      lamports: 1_000_000_000,
-      data: new Uint8Array(accountData),
-      owner: PYTH_RECEIVER_PROGRAM_ID, // required for Anchor's Account<PriceUpdateV2> check
-      executable: false,
-    });
-
-    // Step 4 — set SVM clock == publishTime so age = 0 (well within MAX_PRICE_AGE_SEC=60)
-    const clock = svm.getClock();
-    clock.unixTimestamp = BigInt(publishTime);
-    svm.setClock(clock);
-
-    // Step 5 — call get_btc_price
     const priceTx = (await program.methods
       .getBtcPrice()
       .accounts({
         user: user.publicKey,
-        btcPriceFeed: feedKey.publicKey,
+        btcPriceFeed: feedKey,
       })
       .transaction()) as Transaction;
 
     sendTx(svm, priceTx, [user]);
 
-    // Step 6 — read back the stored whole-dollar price via BorshAccountsCoder
     const raw = svm.getAccount(currentPricePda);
     expect(raw).to.not.be.null;
 
     const coder = new BorshAccountsCoder(OraclePracticeIDL as any);
     const decoded = coder.decode("CurrentPrice", Buffer.from(raw!.data));
     const storedPrice = decoded.btc_price.toNumber();
+    const expectedWholeUsd = wholeUsd(priceI64, exponent);
 
-    const expectedWholeUsd = Math.floor(
-      Number(priceI64) * Math.pow(10, exponent),
-    );
     console.log(
       `stored BTC/USD price: $${storedPrice} (Hermes whole-dollar: $${expectedWholeUsd})`,
     );
 
     expect(storedPrice).to.be.greaterThan(1_000);
     expect(storedPrice).to.be.lessThan(10_000_000);
+    expect(storedPrice).to.equal(expectedWholeUsd);
+  });
+
+  it("get_sol_price: reads live SOL/USD price from Pyth Hermes", async () => {
+    const initTx = (await program.methods
+      .initialize()
+      .accounts({ deployer: user.publicKey })
+      .transaction()) as Transaction;
+    sendTx(svm, initTx, [user]);
+
+    const { priceI64, exponent, publishTime } = await fetchHermesPrice(
+      SOL_USD_FEED_ID.toString("hex"),
+    );
+
+    console.log(
+      `Hermes SOL/USD: raw=${priceI64}, expo=${exponent} => ~$${wholeUsd(
+        priceI64,
+        exponent,
+      )}`,
+    );
+
+    const feedKey = injectPriceFeed(
+      svm,
+      SOL_USD_FEED_ID,
+      priceI64,
+      exponent,
+      publishTime,
+    );
+
+    const priceTx = (await program.methods
+      .getSolPrice()
+      .accounts({
+        user: user.publicKey,
+        solPriceFeed: feedKey,
+      })
+      .transaction()) as Transaction;
+
+    sendTx(svm, priceTx, [user]);
+
+    const raw = svm.getAccount(currentPricePda);
+    const coder = new BorshAccountsCoder(OraclePracticeIDL as any);
+    const decoded = coder.decode("CurrentPrice", Buffer.from(raw!.data));
+    const storedPrice = decoded.sol_price.toNumber();
+    const expectedWholeUsd = wholeUsd(priceI64, exponent);
+
+    console.log(
+      `stored SOL/USD price: $${storedPrice} (Hermes whole-dollar: $${expectedWholeUsd})`,
+    );
+
+    expect(storedPrice).to.be.greaterThan(1);
+    expect(storedPrice).to.be.lessThan(10_000);
+    expect(storedPrice).to.equal(expectedWholeUsd);
+  });
+
+  it("get_eth_price: reads live ETH/USD price from Pyth Hermes", async () => {
+    const initTx = (await program.methods
+      .initialize()
+      .accounts({ deployer: user.publicKey })
+      .transaction()) as Transaction;
+    sendTx(svm, initTx, [user]);
+
+    const { priceI64, exponent, publishTime } = await fetchHermesPrice(
+      ETH_USD_FEED_ID.toString("hex"),
+    );
+
+    console.log(
+      `Hermes ETH/USD: raw=${priceI64}, expo=${exponent} => ~$${wholeUsd(
+        priceI64,
+        exponent,
+      )}`,
+    );
+
+    const feedKey = injectPriceFeed(
+      svm,
+      ETH_USD_FEED_ID,
+      priceI64,
+      exponent,
+      publishTime,
+    );
+
+    const priceTx = (await program.methods
+      .getEthPrice()
+      .accounts({
+        user: user.publicKey,
+        ethPriceFeed: feedKey,
+      })
+      .transaction()) as Transaction;
+
+    sendTx(svm, priceTx, [user]);
+
+    const raw = svm.getAccount(currentPricePda);
+    const coder = new BorshAccountsCoder(OraclePracticeIDL as any);
+    const decoded = coder.decode("CurrentPrice", Buffer.from(raw!.data));
+    const storedPrice = decoded.eth_price.toNumber();
+    const expectedWholeUsd = wholeUsd(priceI64, exponent);
+
+    console.log(
+      `stored ETH/USD price: $${storedPrice} (Hermes whole-dollar: $${expectedWholeUsd})`,
+    );
+
+    expect(storedPrice).to.be.greaterThan(100);
+    expect(storedPrice).to.be.lessThan(100_000);
     expect(storedPrice).to.equal(expectedWholeUsd);
   });
 });

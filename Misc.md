@@ -1,0 +1,4 @@
+# Pyth Address
+
+7UVimffxr9ow1uXYxsr4LHAcV58mLzhmwaeKvJ1pjLiE -- SOL/USD
+42amVS4KgzR9rA28tkVYqVXjq9Qa8dcZQMbH5EYFX6XC -- ETH/USD

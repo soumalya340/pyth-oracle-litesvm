@@ -28,13 +28,18 @@ const PROGRAM_ID = new PublicKey(OraclePracticeIDL.address);
 
 const CURRENT_PRICE_SEED = Buffer.from("current_price");
 
-// Canonical Pyth push-oracle BTC/USD account on mainnet.
-// Derived by the pyth-push-oracle program (pythWSnswVUd12oZpeFP8e9CVaEqJg25g1Vtc2biRsT)
-// using seeds = [shard_id=0 (2 bytes LE), feed_id (32 bytes)].
-// Owned by the Pyth Receiver (rec5EKMGg6MxZYaMdyBfgwp4d5rB9T1VQH5pJv5LtFJ),
-// continuously updated on-chain, and accepted by Anchor's Account<PriceUpdateV2>.
+// Canonical Pyth push-oracle PriceUpdateV2 accounts on mainnet (see Misc.md).
+// Owned by the Pyth Receiver (rec5EKMGg6MxZYaMdyBfgwp4d5rB9T1VQH5pJv5LtFJ).
 const BTC_USD_PUSH_FEED = new PublicKey(
   "4cSM2e6rvbGQUFiJbqytoVMi5GgghSMr8LwVrT9VPSPo",
+);
+
+const SOL_USD_PUSH_FEED = new PublicKey(
+  "7UVimffxr9ow1uXYxsr4LHAcV58mLzhmwaeKvJ1pjLiE", // Misc.md
+);
+
+const ETH_USD_PUSH_FEED = new PublicKey(
+  "42amVS4KgzR9rA28tkVYqVXjq9Qa8dcZQMbH5EYFX6XC", // Misc.md
 );
 
 // ─────────────────────────────────────────────
@@ -86,6 +91,58 @@ function findCurrentPricePda(user: PublicKey): PublicKey {
   return pda;
 }
 
+function readPriceUpdateFields(data: Buffer) {
+  return {
+    rawPrice: data.readBigInt64LE(73),
+    expo: data.readInt32LE(89),
+    publishTime: Number(data.readBigInt64LE(93)),
+  };
+}
+
+function wholeUsd(rawPrice: bigint, expo: number): number {
+  return Math.floor(Number(rawPrice) * Math.pow(10, expo));
+}
+
+async function cloneMainnetFeed(
+  svm: LiteSVM,
+  connection: Connection,
+  feedAddress: PublicKey,
+) {
+  const accountInfo = await connection.getAccountInfo(feedAddress);
+  if (!accountInfo) {
+    throw new Error(`Pyth push feed not found on mainnet: ${feedAddress.toBase58()}`);
+  }
+
+  const { rawPrice, expo, publishTime } = readPriceUpdateFields(
+    Buffer.from(accountInfo.data),
+  );
+
+  svm.setAccount(feedAddress, {
+    lamports: accountInfo.lamports,
+    data: new Uint8Array(accountInfo.data),
+    owner: accountInfo.owner,
+    executable: accountInfo.executable,
+  });
+
+  const clock = svm.getClock();
+  clock.unixTimestamp = BigInt(publishTime);
+  svm.setClock(clock);
+
+  return { rawPrice, expo, publishTime };
+}
+
+async function initializeCurrentPrice(
+  svm: LiteSVM,
+  program: Program<OraclePractice>,
+  user: Keypair,
+): Promise<void> {
+  const initTx = (await program.methods
+    .initialize()
+    .accounts({ deployer: user.publicKey })
+    .transaction()) as Transaction;
+  sendTx(svm, initTx, [user]);
+}
+
 // ─────────────────────────────────────────────
 // Tests
 // ─────────────────────────────────────────────
@@ -112,47 +169,21 @@ describe("oracle_live_accounts", () => {
   // `solana-test-validator --clone`). The SVM clock is synced to the account's
   // publish_time so the MAX_PRICE_AGE_SEC=60 check passes.
   it("get_btc_price: reads BTC/USD price from cloned mainnet account", async () => {
-    // Step 1 — fetch the real PriceUpdateV2 account bytes from mainnet
-    const accountInfo = await connection.getAccountInfo(BTC_USD_PUSH_FEED);
-    if (!accountInfo)
-      throw new Error("Pyth BTC/USD push feed not found on mainnet");
-
-    // Read publish_time from offset 93 (i64 LE) — needed to sync the SVM clock
-    const publishTime = Number(
-      Buffer.from(accountInfo.data).readBigInt64LE(93),
+    const { rawPrice, expo } = await cloneMainnetFeed(
+      svm,
+      connection,
+      BTC_USD_PUSH_FEED,
     );
 
-    // Read price and exponent for logging
-    const rawPrice = Buffer.from(accountInfo.data).readBigInt64LE(73);
-    const expo = Buffer.from(accountInfo.data).readInt32LE(89);
     console.log(
-      `Mainnet BTC/USD: raw=${rawPrice}, expo=${expo} => ~$${Math.floor(
-        Number(rawPrice) * Math.pow(10, expo),
+      `Mainnet BTC/USD: raw=${rawPrice}, expo=${expo} => ~$${wholeUsd(
+        rawPrice,
+        expo,
       )}`,
     );
 
-    // Step 2 — inject the real account bytes into LiteSVM at the canonical address.
-    // This is the LiteSVM equivalent of `solana-test-validator --clone <address>`.
-    svm.setAccount(BTC_USD_PUSH_FEED, {
-      lamports: accountInfo.lamports,
-      data: new Uint8Array(accountInfo.data),
-      owner: accountInfo.owner,
-      executable: accountInfo.executable,
-    });
+    await initializeCurrentPrice(svm, program, user);
 
-    // Step 3 — sync SVM clock to publish_time so age = 0 (within MAX_PRICE_AGE_SEC=60)
-    const clock = svm.getClock();
-    clock.unixTimestamp = BigInt(publishTime);
-    svm.setClock(clock);
-
-    // Step 4 — initialize the CurrentPrice PDA
-    const initTx = (await program.methods
-      .initialize()
-      .accounts({ deployer: user.publicKey })
-      .transaction()) as Transaction;
-    sendTx(svm, initTx, [user]);
-
-    // Step 5 — call get_btc_price passing the canonical feed address
     const priceTx = (await program.methods
       .getBtcPrice()
       .accounts({
@@ -163,21 +194,102 @@ describe("oracle_live_accounts", () => {
 
     sendTx(svm, priceTx, [user]);
 
-    // Step 6 — decode and verify the stored whole-dollar price
     const raw = svm.getAccount(currentPricePda);
     expect(raw).to.not.be.null;
 
     const coder = new BorshAccountsCoder(OraclePracticeIDL as any);
     const decoded = coder.decode("CurrentPrice", Buffer.from(raw!.data));
     const storedPrice = decoded.btc_price.toNumber();
+    const expectedWholeUsd = wholeUsd(rawPrice, expo);
 
-    const expectedWholeUsd = Math.floor(Number(rawPrice) * Math.pow(10, expo));
     console.log(
       `stored BTC/USD price: $${storedPrice} (mainnet whole-dollar: $${expectedWholeUsd})`,
     );
 
     expect(storedPrice).to.be.greaterThan(1_000);
     expect(storedPrice).to.be.lessThan(10_000_000);
+    expect(storedPrice).to.equal(expectedWholeUsd);
+  });
+
+  it("get_sol_price: reads SOL/USD price from cloned mainnet account", async () => {
+    const { rawPrice, expo } = await cloneMainnetFeed(
+      svm,
+      connection,
+      SOL_USD_PUSH_FEED,
+    );
+
+    console.log(
+      `Mainnet SOL/USD: raw=${rawPrice}, expo=${expo} => ~$${wholeUsd(
+        rawPrice,
+        expo,
+      )}`,
+    );
+
+    await initializeCurrentPrice(svm, program, user);
+
+    const priceTx = (await program.methods
+      .getSolPrice()
+      .accounts({
+        user: user.publicKey,
+        solPriceFeed: SOL_USD_PUSH_FEED,
+      })
+      .transaction()) as Transaction;
+
+    sendTx(svm, priceTx, [user]);
+
+    const raw = svm.getAccount(currentPricePda);
+    const coder = new BorshAccountsCoder(OraclePracticeIDL as any);
+    const decoded = coder.decode("CurrentPrice", Buffer.from(raw!.data));
+    const storedPrice = decoded.sol_price.toNumber();
+    const expectedWholeUsd = wholeUsd(rawPrice, expo);
+
+    console.log(
+      `stored SOL/USD price: $${storedPrice} (mainnet whole-dollar: $${expectedWholeUsd})`,
+    );
+
+    expect(storedPrice).to.be.greaterThan(1);
+    expect(storedPrice).to.be.lessThan(10_000);
+    expect(storedPrice).to.equal(expectedWholeUsd);
+  });
+
+  it("get_eth_price: reads ETH/USD price from cloned mainnet account", async () => {
+    const { rawPrice, expo } = await cloneMainnetFeed(
+      svm,
+      connection,
+      ETH_USD_PUSH_FEED,
+    );
+
+    console.log(
+      `Mainnet ETH/USD: raw=${rawPrice}, expo=${expo} => ~$${wholeUsd(
+        rawPrice,
+        expo,
+      )}`,
+    );
+
+    await initializeCurrentPrice(svm, program, user);
+
+    const priceTx = (await program.methods
+      .getEthPrice()
+      .accounts({
+        user: user.publicKey,
+        ethPriceFeed: ETH_USD_PUSH_FEED,
+      })
+      .transaction()) as Transaction;
+
+    sendTx(svm, priceTx, [user]);
+
+    const raw = svm.getAccount(currentPricePda);
+    const coder = new BorshAccountsCoder(OraclePracticeIDL as any);
+    const decoded = coder.decode("CurrentPrice", Buffer.from(raw!.data));
+    const storedPrice = decoded.eth_price.toNumber();
+    const expectedWholeUsd = wholeUsd(rawPrice, expo);
+
+    console.log(
+      `stored ETH/USD price: $${storedPrice} (mainnet whole-dollar: $${expectedWholeUsd})`,
+    );
+
+    expect(storedPrice).to.be.greaterThan(100);
+    expect(storedPrice).to.be.lessThan(100_000);
     expect(storedPrice).to.equal(expectedWholeUsd);
   });
 });

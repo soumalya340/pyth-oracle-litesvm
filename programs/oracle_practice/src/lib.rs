@@ -28,19 +28,54 @@ pub mod oracle_practice {
             &feed_id,
         )?;
 
-        require!(price.price > 0, OracleError::InvalidOraclePrice);
-
-        // price.exponent is typically -8 for BTC/USD.
-        // Divide by 10^|exponent| to get the whole-dollar USD value.
-        // e.g. price=7752876000000, exponent=-8 → 7752876000000 / 10^8 = 77528
-        let divisor = 10u64.pow(price.exponent.unsigned_abs());
-        let whole_usd = (price.price as u64)
-            .checked_div(divisor)
-            .ok_or(error!(OracleError::InvalidOraclePrice))?;
-
-        ctx.accounts.current_price.btc_price = whole_usd;
+        ctx.accounts.current_price.btc_price = whole_usd_from_pyth_price(&price)?;
         Ok(())
     }
+
+    /// Reads the SOL/USD price from Pyth and saves it into the CurrentPrice account.
+    pub fn get_sol_price(ctx: Context<GetSolPrice>) -> Result<()> {
+        let feed_id = get_feed_id_from_hex(
+            "0xef0d8b6fda2ceba41da15d4095d1da392a0d2f8ed0c6c7bc0f4cfac8c280b56d",
+        )?;
+
+        let price = ctx.accounts.sol_price_feed.get_price_no_older_than(
+            &Clock::get()?,
+            MAX_PRICE_AGE_SEC,
+            &feed_id,
+        )?;
+
+        ctx.accounts.current_price.sol_price = whole_usd_from_pyth_price(&price)?;
+        Ok(())
+    }
+
+    /// Reads the ETH/USD price from Pyth and saves it into the CurrentPrice account.
+    pub fn get_eth_price(ctx: Context<GetEthPrice>) -> Result<()> {
+        let feed_id = get_feed_id_from_hex(
+            "0xff61491a931112ddf1bd8147cd1b641375f79f5825126d665480874634fd0ace",
+        )?;
+
+        let price = ctx.accounts.eth_price_feed.get_price_no_older_than(
+            &Clock::get()?,
+            MAX_PRICE_AGE_SEC,
+            &feed_id,
+        )?;
+
+        ctx.accounts.current_price.eth_price = whole_usd_from_pyth_price(&price)?;
+        Ok(())
+    }
+}
+
+/// Divide by 10^|exponent| to get the whole-dollar USD value.
+/// e.g. price=7752876000000, exponent=-8 → 77528
+fn whole_usd_from_pyth_price(
+    price: &pyth_solana_receiver_sdk::price_update::Price,
+) -> Result<u64> {
+    require!(price.price > 0, OracleError::InvalidOraclePrice);
+
+    let divisor = 10u64.pow(price.exponent.unsigned_abs());
+    (price.price as u64)
+        .checked_div(divisor)
+        .ok_or(error!(OracleError::InvalidOraclePrice))
 }
 
 #[derive(Accounts)]
@@ -75,10 +110,42 @@ pub struct GetBtcPrice<'info> {
     pub btc_price_feed: Account<'info, PriceUpdateV2>,
 }
 
+#[derive(Accounts)]
+pub struct GetSolPrice<'info> {
+    #[account(mut)]
+    pub user: Signer<'info>,
+
+    #[account(
+        mut,
+        seeds = [CURRENT_PRICE_SEED, user.key().as_ref()],
+        bump,
+    )]
+    pub current_price: Account<'info, CurrentPrice>,
+
+    pub sol_price_feed: Account<'info, PriceUpdateV2>,
+}
+
+#[derive(Accounts)]
+pub struct GetEthPrice<'info> {
+    #[account(mut)]
+    pub user: Signer<'info>,
+
+    #[account(
+        mut,
+        seeds = [CURRENT_PRICE_SEED, user.key().as_ref()],
+        bump,
+    )]
+    pub current_price: Account<'info, CurrentPrice>,
+
+    pub eth_price_feed: Account<'info, PriceUpdateV2>,
+}
+
 #[account]
 #[derive(InitSpace)]
 pub struct CurrentPrice {
     pub btc_price: u64,
+    pub sol_price: u64,
+    pub eth_price: u64,
 }
 
 #[error_code]
